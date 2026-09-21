@@ -1,0 +1,12 @@
+.env
+bybit_bot/logs/
+bybit_bot/data/research_cache.json
+bybit_bot/data/active_orders.json
+bybit_bot/data/trade_log.json
+bybit_bot/data/paper_balance.json
+bybit_bot/data/oi_history.json
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
