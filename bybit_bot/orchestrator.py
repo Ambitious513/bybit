@@ -50,6 +50,7 @@ from bybit_bot.config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
 )
+from bybit_bot.monitor import _ORDERS_LOCK
 
 
 # ── Validation ────────────────────────────────────────────────────────────────
@@ -130,9 +131,10 @@ def cmd_test() -> None:
 
 def cmd_research() -> None:
     """--research: run full research pipeline."""
+    cache_only = datetime.now(UTC).hour == 20
     try:
         from bybit_bot import research
-        research.run_research()
+        research.run_research(cache_only=cache_only)
     except ImportError:
         logger.warning("research.py not yet implemented (TASK-017)")
         telegram.send_message("⚠️ research.py not yet implemented")
@@ -181,7 +183,7 @@ def load_active_orders() -> list[dict]:
 
 
 def _save_active_orders(orders: list[dict]) -> bool:
-    """Atomically persist active-order changes made by a Telegram command."""
+    """Atomically persist active-order changes while the caller holds _ORDERS_LOCK."""
     path = _bot_data_path("active_orders.json")
     temporary_path = f"{path}.tmp"
     try:
@@ -266,48 +268,71 @@ def handle_filled(symbol: str, price: float, time_str: str) -> None:
     except ValueError:
         telegram.send_message("⚠️ Invalid fill time — use HH:MM (UTC)")
         return
-    orders = load_active_orders()
-    for order in orders:
-        if order.get("symbol") == normalized and order.get("status") == "PENDING":
-            order["status"] = "FILLED"
-            order["fill_time_utc"] = fill_time
-            if _save_active_orders(orders):
-                telegram.send_message(
-                    f"✅ Trade logged: <b>{normalized}</b> {order.get('side', 'LONG')} @ ${price:g}\n"
-                    "Time-stop clock starts now. 2H limit."
-                )
-            return
-    telegram.send_message(f"No pending order for <b>{normalized}</b>")
+    if not _ORDERS_LOCK.acquire(timeout=10.0):
+        logger.error("filled_lock_timeout symbol=%s", normalized)
+        telegram.send_message("⚠️ Order state is busy — retry /filled in a moment")
+        return
+    try:
+        orders = load_active_orders()
+        for order in orders:
+            if order.get("symbol") == normalized and order.get("status") == "PENDING":
+                order["status"] = "FILLED"
+                order["fill_time_utc"] = fill_time
+                order["planned_entry"] = order.get("entry")
+                order["fill_price"] = price
+                if _save_active_orders(orders):
+                    telegram.send_message(
+                        f"✅ Trade logged: <b>{normalized}</b> {order.get('side', 'LONG')} @ ${price:g}\n"
+                        "Time-stop clock starts now. 2H limit."
+                    )
+                return
+        telegram.send_message(f"No pending order for <b>{normalized}</b>")
+    finally:
+        _ORDERS_LOCK.release()
 
 
 def handle_closed(symbol: str, price: float) -> None:
     """Record a user-confirmed manual close and update the paper balance once."""
     normalized = _normalize_symbol(symbol)
-    orders = load_active_orders()
-    for order in orders:
-        if order.get("symbol") == normalized and order.get("status") == "FILLED":
-            from bybit_bot import monitor
+    if not _ORDERS_LOCK.acquire(timeout=10.0):
+        logger.error("closed_lock_timeout symbol=%s", normalized)
+        telegram.send_message("⚠️ Order state is busy — retry /closed in a moment")
+        return
+    try:
+        orders = load_active_orders()
+        for order in orders:
+            if order.get("symbol") == normalized and order.get("status") == "FILLED":
+                from bybit_bot import monitor
 
-            pnl = monitor.calculate_pnl(order, price, pct=1.0)
-            monitor.log_trade(order, price, "MANUAL_CLOSE")
-            monitor.update_paper_balance(pnl)
-            order["status"] = "CLOSED"
-            if _save_active_orders(orders):
-                balance = _load_balance()
-                telegram.send_message(f"Trade closed. P&amp;L: {pnl:+.2f} | Balance: ${_float(balance.get('balance')):.2f}")
-            return
-    telegram.send_message(f"No filled order for <b>{normalized}</b>")
+                pnl = monitor.calculate_pnl(order, price, pct=1.0)
+                monitor.log_trade(order, price, "MANUAL_CLOSE")
+                monitor.update_paper_balance(pnl)
+                order["status"] = "CLOSED"
+                if _save_active_orders(orders):
+                    balance = _load_balance()
+                    telegram.send_message(f"Trade closed. P&amp;L: {pnl:+.2f} | Balance: ${_float(balance.get('balance')):.2f}")
+                return
+        telegram.send_message(f"No filled order for <b>{normalized}</b>")
+    finally:
+        _ORDERS_LOCK.release()
 
 
 def handle_cancel(symbol: str) -> None:
     """Remove a PENDING manual card from the monitor watchlist."""
     normalized = _normalize_symbol(symbol)
-    orders = load_active_orders()
-    remaining = [order for order in orders if not (order.get("symbol") == normalized and order.get("status") == "PENDING")]
-    if len(remaining) == len(orders):
-        telegram.send_message(f"No pending order for <b>{normalized}</b>")
-    elif _save_active_orders(remaining):
-        telegram.send_message(f"Order cancelled — <b>{normalized}</b> removed from watchlist")
+    if not _ORDERS_LOCK.acquire(timeout=10.0):
+        logger.error("cancel_lock_timeout symbol=%s", normalized)
+        telegram.send_message("⚠️ Order state is busy — retry /cancel in a moment")
+        return
+    try:
+        orders = load_active_orders()
+        remaining = [order for order in orders if not (order.get("symbol") == normalized and order.get("status") == "PENDING")]
+        if len(remaining) == len(orders):
+            telegram.send_message(f"No pending order for <b>{normalized}</b>")
+        elif _save_active_orders(remaining):
+            telegram.send_message(f"Order cancelled — <b>{normalized}</b> removed from watchlist")
+    finally:
+        _ORDERS_LOCK.release()
 
 
 def handle_skip(symbol: str) -> None:
@@ -631,9 +656,9 @@ def cmd_daemon() -> None:
 
     scheduler = BlockingScheduler(timezone="UTC")
 
-    # Research: every 4 hours
+    # Research: five minutes after each four-hour candle boundary.
     scheduler.add_job(
-        cmd_research, "interval", hours=4,
+        cmd_research, "cron", hour="0,4,8,12,16,20", minute=5,
         id="research", name="Full research pipeline",
         max_instances=1,
     )

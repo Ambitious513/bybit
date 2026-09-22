@@ -357,7 +357,7 @@ def _format_research_card(result: dict) -> str:
     return "\n".join(lines)
 
 
-def run_research() -> dict:
+def run_research(cache_only: bool = False) -> dict:
     """Run the complete research pipeline, cache results, and notify Telegram."""
     # Wave one contains independent I/O. Losers are deliberately deferred until
     # after deterministic regime classification because they are BULLISH-only.
@@ -424,6 +424,10 @@ def run_research() -> dict:
     }
     _save_research(result)
     telegram.send_message(_format_research_card(result))
+
+    if cache_only:
+        logger.info("research_cache_only_mode — skipping planning and execution cards")
+        return result
 
     try:
         from bybit_bot import planning

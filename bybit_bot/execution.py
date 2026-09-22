@@ -15,12 +15,14 @@ from bybit_bot.config import (
     BTC_INVALIDATION,
     CORE_PCT,
     HARD_CLOSE_UTC_HOUR,
+    MAX_TRADES_PER_SESSION,
     PAPER_RISK_PER_TRADE,
     RUNNER_PCT,
     WINDOW_PATIENT_MINS,
     WINDOW_SET_FORGET_MINS,
     WINDOW_URGENT_MINS,
 )
+from bybit_bot.monitor import _ORDERS_LOCK
 
 logger = logging.getLogger("execution")
 
@@ -74,10 +76,8 @@ def _load_orders() -> list[dict]:
         return []
 
 
-def save_pending_order(card: dict) -> None:
-    """Append a PENDING card to active_orders.json using an atomic replacement."""
-    orders = _load_orders()
-    orders.append(card)
+def _save_pending_order_locked(card: dict, orders: list[dict]) -> bool:
+    """Persist an already-appended order while the caller holds _ORDERS_LOCK."""
     temporary_path = f"{_ACTIVE_ORDERS_PATH}.tmp"
     try:
         os.makedirs(_DATA_DIR, exist_ok=True)
@@ -85,8 +85,18 @@ def save_pending_order(card: dict) -> None:
             json.dump(orders, handle, indent=2)
         os.replace(temporary_path, _ACTIVE_ORDERS_PATH)
         logger.info("order_saved symbol=%s expiry=%s", card["symbol"], card["expiry_utc"])
+        return True
     except OSError as exc:
         logger.error("active_order_save_error symbol=%s error=%s", card.get("symbol"), exc)
+        return False
+
+
+def save_pending_order(card: dict) -> None:
+    """Append a PENDING card to active_orders.json using an atomic replacement."""
+    with _ORDERS_LOCK:
+        orders = _load_orders()
+        orders.append(card)
+        _save_pending_order_locked(card, orders)
 
 
 def send_execution_card_telegram(card: dict) -> bool:
@@ -154,6 +164,11 @@ def generate_card(setup: dict) -> dict | None:
     The function never contacts an order endpoint. Invalid stop geometry or
     unavailable regime context prevents card creation rather than guessing.
     """
+    now = datetime.now(UTC)
+    if now.hour >= HARD_CLOSE_UTC_HOUR:
+        logger.info("card_blocked_hard_close symbol=%s hour=%s", setup.get("symbol"), now.hour)
+        return None
+
     context = _load_regime_context()
     if context is None:
         return None
@@ -169,6 +184,9 @@ def generate_card(setup: dict) -> dict | None:
         return None
     if stop_dist_pct >= 8.0:
         logger.warning("stop_too_wide symbol=%s stop_dist_pct=%s", setup.get("symbol"), stop_dist_pct)
+        return None
+    if stop_dist_pct < 0.3:
+        logger.warning("stop_too_tight symbol=%s stop_dist_pct=%.4f", setup.get("symbol"), stop_dist_pct)
         return None
     if (side == "LONG" and sl >= entry) or (side == "SHORT" and sl <= entry):
         logger.error("execution_invalid_stop_geometry symbol=%s side=%s", setup.get("symbol"), side)
@@ -191,7 +209,6 @@ def generate_card(setup: dict) -> dict | None:
     tp3 = entry + direction * entry * stop_fraction * 2.5
     risk = PAPER_RISK_PER_TRADE
     notional = risk / stop_fraction
-    now = datetime.now(UTC)
     card = {
         "symbol": str(setup.get("symbol", "")), "side": side, "entry": entry,
         "zone_top": _float(sr.get("entry_zone_top")), "zone_bottom": _float(sr.get("entry_zone_bottom")),
@@ -205,6 +222,20 @@ def generate_card(setup: dict) -> dict | None:
         "score": int(setup.get("score", 0)), "btc_price": _float(context.get("btc_price")),
         "regime": str(context.get("regime", "UNKNOWN")), "btc_support": _float(context.get("btc_support")),
     }
+    with _ORDERS_LOCK:
+        existing = _load_orders()
+        active_count = sum(1 for order in existing if order.get("status") in {"PENDING", "FILLED"})
+        if active_count >= MAX_TRADES_PER_SESSION:
+            logger.info("session_cap_reached symbol=%s active=%s", setup.get("symbol"), active_count)
+            return None
+        existing_symbols = {
+            order.get("symbol") for order in existing if order.get("status") in {"PENDING", "FILLED"}
+        }
+        if str(setup.get("symbol", "")) in existing_symbols:
+            logger.info("duplicate_card_skipped symbol=%s", setup.get("symbol"))
+            return None
+        existing.append(card)
+        if not _save_pending_order_locked(card, existing):
+            return None
     send_execution_card_telegram(card)
-    save_pending_order(card)
     return card

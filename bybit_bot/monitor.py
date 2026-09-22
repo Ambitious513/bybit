@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -10,6 +11,8 @@ from bybit_bot import bybit_api, sr_calculator, telegram
 from bybit_bot.config import HARD_CLOSE_UTC_HOUR, PAPER_BALANCE, PAPER_BALANCE_FLOOR, TIME_STOP_HOURS
 
 logger = logging.getLogger("monitor")
+
+_ORDERS_LOCK = threading.Lock()
 
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 _ACTIVE_ORDERS_PATH = os.path.join(_DATA_DIR, "active_orders.json")
@@ -74,7 +77,7 @@ def _atomic_write(path: str, payload: Any, description: str) -> bool:
 
 def calculate_pnl(order: dict, exit_price: float, pct: float = 1.0) -> float:
     """Calculate rounded paper P&L for a LONG or SHORT fraction of an order."""
-    entry = _float(order.get("entry"))
+    entry = _float(order.get("fill_price") or order.get("entry"))
     notional = _float(order.get("notional"))
     if entry <= 0:
         logger.error("pnl_invalid_entry symbol=%s", order.get("symbol"))
@@ -94,6 +97,8 @@ def log_trade(order: dict, exit_price: float, exit_reason: str) -> None:
         return
     record = {
         "symbol": order.get("symbol"), "side": order.get("side"), "entry": _float(order.get("entry")),
+        "planned_entry": _float(order.get("planned_entry", order.get("entry"))),
+        "fill_price": _float(order.get("fill_price", order.get("entry"))),
         "exit_price": float(exit_price), "exit_reason": exit_reason,
         "pnl": calculate_pnl(order, exit_price), "paper_risk": _float(order.get("paper_risk")),
         "score": order.get("score", 0), "opened_at": order.get("fill_time_utc"),
@@ -296,38 +301,44 @@ def _thin_volume_alerts(order: dict, current_price: float, now: datetime) -> lis
 
 def run_monitor_cycle() -> None:
     """Run one 2-minute read-only monitoring cycle over persisted paper orders."""
-    orders = _load_json_array(_ACTIVE_ORDERS_PATH, "active_orders")
-    if orders is None:
-        telegram.send_message("⚠️ <b>Active-order state corrupted</b> — monitor skipped cycle")
+    if not _ORDERS_LOCK.acquire(timeout=10.0):
+        logger.error("monitor_lock_timeout — skipping cycle")
         return
-    if not orders:
-        logger.info("no_open_orders")
-        return
-    btc_regime = load_btc_regime_from_cache()
-    updated_orders: list[dict] = []
-    for order in orders:
-        if not isinstance(order, dict):
-            logger.warning("invalid_order_record_skipped")
-            updated_orders.append(order)
-            continue
-        if order.get("status") == "PENDING":
-            alerts, updated = check_order(order, 0.0, 0.0, btc_regime)
-            if updated.get("status") == "PENDING":
-                alerts.extend(_pending_advanced_alerts(updated, _utc_now()))
-        elif order.get("status") == "FILLED":
-            symbol = str(order.get("symbol", ""))
-            ticker = bybit_api.get_ticker(symbol)
-            btc_ticker = bybit_api.get_ticker("BTCUSDT")
-            if not ticker or not btc_ticker:
-                logger.error("monitor_price_unavailable symbol=%s", symbol)
-                telegram.send_message(f"⚠️ <b>Monitor price unavailable</b> — {symbol}; retrying next cycle")
+    try:
+        orders = _load_json_array(_ACTIVE_ORDERS_PATH, "active_orders")
+        if orders is None:
+            telegram.send_message("⚠️ <b>Active-order state corrupted</b> — monitor skipped cycle")
+            return
+        if not orders:
+            logger.info("no_open_orders")
+            return
+        btc_regime = load_btc_regime_from_cache()
+        updated_orders: list[dict] = []
+        for order in orders:
+            if not isinstance(order, dict):
+                logger.warning("invalid_order_record_skipped")
                 updated_orders.append(order)
                 continue
-            current_price = _float(ticker.get("price"))
-            alerts, updated = check_order(order, current_price, _float(btc_ticker.get("price")), btc_regime)
-        else:
-            alerts, updated = [], order
-        for alert in alerts:
-            telegram.send_message(alert)
-        updated_orders.append(updated)
-    _atomic_write(_ACTIVE_ORDERS_PATH, updated_orders, "active_orders")
+            if order.get("status") == "PENDING":
+                alerts, updated = check_order(order, 0.0, 0.0, btc_regime)
+                if updated.get("status") == "PENDING":
+                    alerts.extend(_pending_advanced_alerts(updated, _utc_now()))
+            elif order.get("status") == "FILLED":
+                symbol = str(order.get("symbol", ""))
+                ticker = bybit_api.get_ticker(symbol)
+                btc_ticker = bybit_api.get_ticker("BTCUSDT")
+                if not ticker or not btc_ticker:
+                    logger.error("monitor_price_unavailable symbol=%s", symbol)
+                    telegram.send_message(f"⚠️ <b>Monitor price unavailable</b> — {symbol}; retrying next cycle")
+                    updated_orders.append(order)
+                    continue
+                current_price = _float(ticker.get("price"))
+                alerts, updated = check_order(order, current_price, _float(btc_ticker.get("price")), btc_regime)
+            else:
+                alerts, updated = [], order
+            for alert in alerts:
+                telegram.send_message(alert)
+            updated_orders.append(updated)
+        _atomic_write(_ACTIVE_ORDERS_PATH, updated_orders, "active_orders")
+    finally:
+        _ORDERS_LOCK.release()

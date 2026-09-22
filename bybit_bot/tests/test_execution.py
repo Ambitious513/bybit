@@ -94,7 +94,9 @@ def test_validity_windows(tmp_path, monkeypatch, current_price, label, minutes):
 def test_active_orders_json_appends(tmp_path, monkeypatch):
     execution, order_path = _context(tmp_path, monkeypatch)
     execution.generate_card(_setup())
-    execution.generate_card(_setup(stop=4.0))
+    better_setup = _setup(stop=4.0)
+    better_setup["symbol"] = "BETTERUSDT"
+    execution.generate_card(better_setup)
     assert len(json.loads(order_path.read_text(encoding="utf-8"))) == 2
 
 
