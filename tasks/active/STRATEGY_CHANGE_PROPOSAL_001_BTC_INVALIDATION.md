@@ -1,9 +1,9 @@
-# STRATEGY CHANGE PROPOSAL 001 — BTC Invalidation Level
+﻿# STRATEGY CHANGE PROPOSAL 001 â€” BTC Invalidation Level
 
-**ID:** SCP-001  
-**Submitted:** 2026-09-22  
-**Submitted by:** Lead CTO  
-**Status:** PENDING HUMAN APPROVAL  
+**ID:** SCP-001
+**Submitted:** 2026-09-22
+**Submitted by:** Lead CTO
+**Status:** PENDING HUMAN APPROVAL
 
 ---
 
@@ -16,7 +16,7 @@ BTC_INVALIDATION = 84200
 Displayed on every execution card as:
 
 ```
-☠️ BTC loses $84,200 → exit
+â˜ ï¸ BTC loses $84,200 â†’ exit
 ```
 
 ## Problem
@@ -39,15 +39,15 @@ calculated at card generation time:
 
 **Proposed formula:**
 ```
-btc_invalidation_price = round(btc_price_at_card_time × 0.95, 0)
+btc_invalidation_price = round(btc_price_at_card_time Ã— 0.95, 0)
 ```
 
 Displayed on card as:
 ```
-☠️ BTC drops 5% to $XX,XXX → exit
+â˜ ï¸ BTC drops 5% to $XX,XXX â†’ exit
 ```
 
-The 5% threshold represents a meaningful intraday regime shift — consistent
+The 5% threshold represents a meaningful intraday regime shift â€” consistent
 with the BTC_BULL_WHALE_MIN and BTC_BEAR_WHALE_MAX thresholds already in
 the strategy.
 
@@ -81,8 +81,8 @@ and reported before human approval.
 
 ## Code Impact (if approved)
 
-- `bybit_bot/execution.py` — compute `btc_invalidation_price` at card time
-- `bybit_bot/config.py` — `BTC_INVALIDATION` constant deprecated for display;
+- `bybit_bot/execution.py` â€” compute `btc_invalidation_price` at card time
+- `bybit_bot/config.py` â€” `BTC_INVALIDATION` constant deprecated for display;
   retained as fallback for monitor checks if needed
 - Display line updated on execution card
 - Test: `test_btc_invalidation_is_5pct_below_card_btc_price`
@@ -100,10 +100,10 @@ Do not implement before:
 ## Approval Decision
 
 ```
-[ ] APPROVED — implement as specified
-[ ] APPROVED WITH MODIFICATION — specify: _______________
-[ ] REJECTED — reason: _______________
-[ ] DEFERRED — revisit after: _______________
+[ ] APPROVED â€” implement as specified
+[ ] APPROVED WITH MODIFICATION â€” specify: _______________
+[ ] REJECTED â€” reason: _______________
+[ ] DEFERRED â€” revisit after: _______________
 ```
 
 Human signature / timestamp: _______________
