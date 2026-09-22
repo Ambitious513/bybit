@@ -41,6 +41,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger("orchestrator")
 
+_RESEARCH_LOCK = threading.Lock()
+
 # ── Imports (after logging so errors are captured) ────────────────────────────
 from bybit_bot import bybit_api, openrouter, telegram
 from bybit_bot.config import (
@@ -131,8 +133,11 @@ def cmd_test() -> None:
 
 def cmd_research() -> None:
     """--research: run full research pipeline."""
-    cache_only = datetime.now(UTC).hour == 20
+    if not _RESEARCH_LOCK.acquire(blocking=False):
+        logger.info("research_already_running — scheduler_skip")
+        return
     try:
+        cache_only = datetime.now(UTC).hour == 20
         from bybit_bot import research
         research.run_research(cache_only=cache_only)
     except ImportError:
@@ -141,6 +146,8 @@ def cmd_research() -> None:
     except Exception as exc:
         logger.exception("research_run_failed error=%s", exc)
         telegram.send_message("⚠️ <b>Research pipeline failed</b> — check bot log")
+    finally:
+        _RESEARCH_LOCK.release()
 
 
 def cmd_plan() -> None:
@@ -169,6 +176,28 @@ def cmd_execute() -> None:
 def _bot_data_path(filename: str) -> str:
     """Return a runtime data-file path without exposing project-wide state."""
     return os.path.join(os.path.dirname(__file__), "data", filename)
+
+
+def _load_tg_offset() -> int:
+    """Load the next Telegram update offset, defaulting safely when unavailable."""
+    try:
+        with open(_bot_data_path("tg_offset.json"), "r", encoding="utf-8") as handle:
+            return int(json.load(handle).get("offset", 0))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        return 0
+
+
+def _save_tg_offset(offset: int) -> None:
+    """Atomically persist the next Telegram update offset after an acknowledged update."""
+    path = _bot_data_path("tg_offset.json")
+    temporary_path = f"{path}.tmp"
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(temporary_path, "w", encoding="utf-8") as handle:
+            json.dump({"offset": offset}, handle)
+        os.replace(temporary_path, path)
+    except OSError as exc:
+        logger.warning("tg_offset_save_failed error=%s", exc)
 
 
 def load_active_orders() -> list[dict]:
@@ -452,9 +481,23 @@ def handle_market(symbol: str) -> None:
 
 def handle_research() -> None:
     """Start full research in a background thread so command polling remains responsive."""
-    from bybit_bot import research
+    if not _RESEARCH_LOCK.acquire(blocking=False):
+        telegram.send_message("🔍 Research already in progress — card incoming shortly")
+        return
 
-    threading.Thread(target=research.run_research, name="research-command", daemon=True).start()
+    def _run() -> None:
+        """Run command-triggered research and always release its ownership lock."""
+        try:
+            from bybit_bot import research
+
+            research.run_research()
+        except Exception as exc:
+            logger.exception("research_command_failed error=%s", exc)
+            telegram.send_message("⚠️ <b>Research pipeline failed</b> — check bot log")
+        finally:
+            _RESEARCH_LOCK.release()
+
+    threading.Thread(target=_run, name="research-command", daemon=True).start()
     telegram.send_message("🔍 Research triggered — card incoming in ~30s")
 
 
@@ -524,17 +567,33 @@ def _dispatch_telegram_update(update: dict) -> None:
 
 def _telegram_poll_loop() -> None:
     """Long-poll Telegram updates in a daemon thread beside APScheduler."""
-    offset = 0
+    offset = _load_tg_offset()
+    backoff = 1
+    recovering = False
     while True:
-        updates = telegram.get_updates(offset=offset, timeout=30)
-        if not updates:
-            time.sleep(1)
-            continue
-        for update in updates:
-            update_id = update.get("update_id") if isinstance(update, dict) else None
-            _dispatch_telegram_update(update)
-            if isinstance(update_id, int):
-                offset = max(offset, update_id + 1)
+        try:
+            updates = telegram.get_updates(offset=offset, timeout=30)
+            if recovering:
+                logger.warning("telegram_poll_resumed")
+                recovering = False
+            backoff = 1
+            if not updates:
+                time.sleep(1)
+                continue
+            for update in updates:
+                update_id = update.get("update_id") if isinstance(update, dict) else None
+                try:
+                    _dispatch_telegram_update(update)
+                except Exception as exc:
+                    logger.error("dispatch_failed update_id=%s error=%s", update_id, exc)
+                if isinstance(update_id, int):
+                    offset = max(offset, update_id + 1)
+                    _save_tg_offset(offset)
+        except Exception as exc:
+            logger.error("telegram_poll_error error=%s — retrying in %ds", exc, backoff)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 60)
+            recovering = True
 
 
 def start_telegram_polling() -> None:
@@ -628,8 +687,34 @@ def cmd_monitor() -> None:
         telegram.send_message("⚠️ <b>Monitor cycle failed</b> — check bot log")
 
 
+def _heartbeat() -> None:
+    """Send a daily non-fatal operational summary to the configured Telegram chat."""
+    try:
+        balance = _load_balance()
+        orders = load_active_orders()
+        active = sum(
+            1 for order in orders
+            if isinstance(order, dict) and order.get("status") in {"PENDING", "FILLED"}
+        )
+        cache_age = "no cache"
+        try:
+            cache_path = _bot_data_path("research_cache.json")
+            age_mins = int((time.time() - os.path.getmtime(cache_path)) / 60)
+            cache_age = f"{age_mins}m ago"
+        except OSError:
+            pass
+        now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+        telegram.send_message(
+            f"✅ <b>Bybit Sniper alive</b> | {now}\n"
+            f"Research cache: {cache_age}\n"
+            f"Active orders: {active} | Balance: ${_float(balance.get('balance')):.2f}"
+        )
+    except Exception as exc:
+        logger.warning("heartbeat_failed error=%s", exc)
+
+
 def cmd_daemon() -> None:
-    """--daemon: start APScheduler with all 4 jobs."""
+    """--daemon: start APScheduler with all configured jobs."""
     try:
         from apscheduler.schedulers.blocking import BlockingScheduler
     except ImportError:
@@ -660,6 +745,12 @@ def cmd_daemon() -> None:
     scheduler.add_job(
         cmd_research, "cron", hour="0,4,8,12,16,20", minute=5,
         id="research", name="Full research pipeline",
+        max_instances=1,
+    )
+
+    scheduler.add_job(
+        _heartbeat, "cron", hour=0, minute=1,
+        id="heartbeat", name="Daily heartbeat",
         max_instances=1,
     )
 
