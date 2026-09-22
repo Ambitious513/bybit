@@ -139,7 +139,7 @@ def format_quickscan_alert(coin: dict, flow: dict) -> str:
         "→ Full research NOT yet run for this coin\n"
         "→ S/R zones NOT calculated yet\n"
         "→ This is an <b>EARLY WARNING only</b>\n\n"
-        f"ACTION: /deepdive {symbol.removesuffix('USDT')} for full card\n"
+        f"ACTION: tap to copy → <code>/deepdive {symbol.removesuffix('USDT')}</code>\n"
         f"        OR wait for next research at {_next_research_time(now)} UTC\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "⚠️ Do NOT trade without full S/R data"

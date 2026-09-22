@@ -481,6 +481,13 @@ def _dispatch_telegram_update(update: dict) -> None:
             handle_help()
         elif command == "/deepdive" and len(parts) == 2:
             handle_deepdive(parts[1])
+        elif command == "/deepdive":
+            telegram.send_message(
+                "⚠️ <b>Missing symbol.</b>\n"
+                "Usage: <code>/deepdive SYMBOL</code>\n"
+                "Example: <code>/deepdive WIF</code>\n\n"
+                "Tap the code block above to copy, then edit and send."
+            )
         else:
             telegram.send_message("⚠️ Invalid command. Use /help")
     except (TypeError, ValueError):
