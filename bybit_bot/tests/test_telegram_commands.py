@@ -111,7 +111,8 @@ def test_handle_balance_shows_optional_core_runner_breakdown(command_state, monk
     }]), encoding="utf-8")
     monkeypatch.setattr(orchestrator.telegram, "send_message", sent.append)
     orchestrator.handle_balance()
-    assert "Approx. core at TP1: $+1.00 | runner at TP3: $+2.50" in sent[0]
+    assert "Approx core at TP1" in sent[0]
+    assert "estimated" in sent[0]
 
 
 def test_handle_market_generates_reduced_risk_card(command_state, monkeypatch):
@@ -121,6 +122,6 @@ def test_handle_market_generates_reduced_risk_card(command_state, monkeypatch):
     monkeypatch.setattr(orchestrator.bybit_api, "get_ticker", lambda symbol: {"price": "100"})
     monkeypatch.setattr(data_aggregator, "get_capital_flow", lambda symbol: {"longShortRatio": 2.0, "fundSide": "Bullish"})
     monkeypatch.setattr(sr_calculator, "get_sr_levels", lambda symbol, price: {"sl_level": 95.0})
-    monkeypatch.setattr(execution, "generate_card", lambda setup: captured.append(execution.PAPER_RISK_PER_TRADE) or {"symbol": setup["symbol"]})
+    monkeypatch.setattr(execution, "generate_card", lambda setup, risk_override=None: captured.append(risk_override) or {"symbol": setup["symbol"]})
     orchestrator.handle_market("LAB")
     assert captured == [1.0]

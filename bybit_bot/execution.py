@@ -16,6 +16,8 @@ from bybit_bot.config import (
     CORE_PCT,
     HARD_CLOSE_UTC_HOUR,
     MAX_TRADES_PER_SESSION,
+    PAPER_RISK_CAUTION,
+    PAPER_RISK_MARKET,
     PAPER_RISK_PER_TRADE,
     RUNNER_PCT,
     WINDOW_PATIENT_MINS,
@@ -29,6 +31,7 @@ logger = logging.getLogger("execution")
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 _ACTIVE_ORDERS_PATH = os.path.join(_DATA_DIR, "active_orders.json")
 _RESEARCH_CACHE_PATH = os.path.join(_DATA_DIR, "research_cache.json")
+_APPROVED_RISK_VALUES = {PAPER_RISK_PER_TRADE, PAPER_RISK_CAUTION, PAPER_RISK_MARKET}
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -123,7 +126,7 @@ def send_execution_card_telegram(card: dict) -> bool:
         "║  □ 5M candle GREEN with volume",
         "║  □ Candle closes ABOVE its midpoint",
         "║  □ Volume ≥ 70% of prior 3 candles",
-        f"║  □ BTC holding above ${_price(_float(card.get('btc_support')))}",
+        f"║  □ BTC holding above ${_price(_float(card.get('btc_support')))} (key zone)",
         "║  □ No negative news last 5 mins",
         "║  ❌ Any box fails → wait next candle",
         "╠══════════════════════════════════════════╣",
@@ -158,7 +161,7 @@ def send_execution_card_telegram(card: dict) -> bool:
     return telegram.send_card(boxed_lines)
 
 
-def generate_card(setup: dict) -> dict | None:
+def generate_card(setup: dict, risk_override: float | None = None) -> dict | None:
     """Generate, notify, and persist a manual PENDING paper-trading card.
 
     The function never contacts an order endpoint. Invalid stop geometry or
@@ -207,7 +210,14 @@ def generate_card(setup: dict) -> dict | None:
     tp1 = entry + direction * entry * stop_fraction * multiplier
     tp2 = entry + direction * entry * stop_fraction * 1.5
     tp3 = entry + direction * entry * stop_fraction * 2.5
-    risk = PAPER_RISK_PER_TRADE
+    if risk_override is not None and risk_override not in _APPROVED_RISK_VALUES:
+        logger.error(
+            "generate_card_invalid_risk_override value=%s symbol=%s",
+            risk_override,
+            setup.get("symbol"),
+        )
+        return None
+    risk = risk_override if risk_override is not None else PAPER_RISK_PER_TRADE
     notional = risk / stop_fraction
     card = {
         "symbol": str(setup.get("symbol", "")), "side": side, "entry": entry,

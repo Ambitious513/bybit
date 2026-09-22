@@ -51,6 +51,7 @@ from bybit_bot.config import (
     SESSION_SKIP_LIST,
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_CHAT_ID,
+    TRADFI_PERPS,
 )
 from bybit_bot.monitor import _ORDERS_LOCK
 
@@ -432,7 +433,7 @@ def handle_balance() -> None:
     )
     breakdown = _approx_trade_breakdown(_load_trade_log())
     if breakdown is not None:
-        message += f"\nApprox. core at TP1: ${breakdown[0]:+.2f} | runner at TP3: ${breakdown[1]:+.2f}"
+        message += f"\nApprox core at TP1: ${breakdown[0]:+.2f} | runner at TP3: ${breakdown[1]:+.2f} (estimated)"
     telegram.send_message(message)
 
 
@@ -465,13 +466,9 @@ def handle_market(symbol: str) -> None:
         market_sr["entry_zone_top"] = current_price
         market_sr["entry_zone_bottom"] = current_price
         market_sr["stop_dist_pct"] = abs(current_price - _float(sr.get("sl_level"))) / current_price * 100
-        setup = {"symbol": normalized, "tag": "CRYPTO", "current_price": current_price, "flow": flow, "sr": market_sr, "news": {}, "score": 0}
-        original_risk = execution.PAPER_RISK_PER_TRADE
-        try:
-            execution.PAPER_RISK_PER_TRADE = PAPER_RISK_MARKET
-            card = execution.generate_card(setup)
-        finally:
-            execution.PAPER_RISK_PER_TRADE = original_risk
+        tag = "TRADFI" if normalized in TRADFI_PERPS else "CRYPTO"
+        setup = {"symbol": normalized, "tag": tag, "current_price": current_price, "flow": flow, "sr": market_sr, "news": {}, "score": 0}
+        card = execution.generate_card(setup, risk_override=PAPER_RISK_MARKET)
         if not card:
             telegram.send_message(f"⚠️ Stop geometry invalid — skip <b>{normalized}</b>")
     except Exception as exc:
@@ -661,11 +658,12 @@ def handle_deepdive(symbol_input: str) -> None:
         news = openrouter.parse_json_response(response) or {
             "sentiment": "NEUTRAL", "risk_events": [], "unlock_today": False, "exploit_today": False,
         }
-        score = planning.score_coin(symbol, flow, news, "CRYPTO")
+        tag = "TRADFI" if symbol in TRADFI_PERPS else "CRYPTO"
+        score = planning.score_coin(symbol, flow, news, tag)
         if score < 0:
             telegram.send_message(f"⚠️ <b>{symbol}</b> score {score} — below threshold")
             return
-        setup = {"symbol": symbol, "score": score, "tag": "CRYPTO", "current_price": price, "flow": flow, "sr": sr, "news": news}
+        setup = {"symbol": symbol, "score": score, "tag": tag, "current_price": price, "flow": flow, "sr": sr, "news": news}
         card = execution.generate_card(setup)
         if not card:
             telegram.send_message(f"⚠️ Stop too wide — skip <b>{symbol}</b>")
