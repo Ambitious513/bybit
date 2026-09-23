@@ -516,7 +516,9 @@ def handle_help() -> None:
         "/skip SYMBOL — skip for this session\n"
         "/status — show active orders\n/btc — BTC flow/regime\n/balance — paper statistics\n"
         "/htfltf SYMBOL — runner management alert\n/market SYMBOL — weekend market card\n"
-        "/research — trigger full research\n/help — command list\n/deepdive SYMBOL — on-demand full card"
+        "/research — trigger full research\n/deepdive SYMBOL — on-demand full card\n"
+        "/test_email — confirm email fallback (operator GATE-3 check)\n"
+        "/help — command list"
     )
 
 
@@ -552,6 +554,8 @@ def _dispatch_telegram_update(update: dict) -> None:
             handle_research()
         elif command == "/help":
             handle_help()
+        elif command == "/test_email":
+            handle_test_email()
         elif command == "/deepdive" and len(parts) == 2:
             handle_deepdive(parts[1])
         elif command == "/deepdive":
@@ -805,6 +809,7 @@ def cmd_daemon() -> None:
         sys.exit(1)
 
     _test_openrouter()  # non-fatal
+    audit_tradfi_perps()  # R3 — warn on inactive TRADFI symbols (non-fatal)
     start_telegram_polling()
 
     scheduler = BlockingScheduler(timezone="UTC")

@@ -95,10 +95,14 @@ def test_dead_cat_in_zone_failed(monitor_state, monkeypatch):
     (state / "active_orders.json").write_text(json.dumps([_pending()]), encoding="utf-8")
     monkeypatch.setattr(monitor, "_utc_now", lambda: datetime(2026, 9, 21, 12, tzinfo=UTC))
     monkeypatch.setattr(monitor.bybit_api, "get_ticker", lambda symbol: {"price": "102"})
-    monkeypatch.setattr(monitor.sr_calculator, "dead_cat_check", lambda *args: {"passed": False, "rule2_volume": {"pass": False}})
+    # New flat-boolean format: bounce_volume_ok=False simulates Phase 2 volume failure.
+    monkeypatch.setattr(monitor.sr_calculator, "dead_cat_check",
+                        lambda *args: {"passed": False, "bounce_volume_ok": False,
+                                       "bounce_above_midpoint": True, "higher_low": True,
+                                       "drop_was_strong": False})
     monkeypatch.setattr(monitor.telegram, "send_message", sent.append)
     monitor.run_monitor_cycle()
-    assert any("DEAD CAT WARNING" in message and "rule2_volume" in message for message in sent)
+    assert any("DEAD CAT WARNING" in message and "bounce volume" in message for message in sent)
 
 
 def test_dead_cat_not_triggered_outside_zone(monitor_state, monkeypatch):

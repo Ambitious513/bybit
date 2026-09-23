@@ -304,7 +304,17 @@ def _pending_advanced_alerts(order: dict, now: datetime) -> list[str]:
                 "→ Safe to place limit order now"
             )
         else:
-            failed = [key for key, value in result.items() if isinstance(value, dict) and not value.get("pass", True)]
+            # Build human-readable list of which checks failed.
+            # New return format uses flat booleans (Phase 1 + Phase 2).
+            _PHASE_LABELS = {
+                "bounce_above_midpoint": "midpoint close",
+                "bounce_volume_ok":      "bounce volume",
+                "higher_low":            "higher low",
+            }
+            failed = [label for key, label in _PHASE_LABELS.items()
+                      if not result.get(key, True)]
+            if result.get("drop_was_strong"):
+                failed.insert(0, "high-vol drop (Phase 1)")
             alerts.append(
                 f"⚠️ <b>DEAD CAT WARNING {symbol}</b>\n"
                 f"Failed checks: {', '.join(failed) or 'unknown'}\n"
