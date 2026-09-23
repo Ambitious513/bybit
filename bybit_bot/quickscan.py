@@ -12,7 +12,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bybit_bot import bybit_api, data_aggregator, telegram
-from bybit_bot.config import HARD_CLOSE_UTC_HOUR, MAX_TRADES_PER_SESSION, PERMANENT_SKIP_LIST, SESSION_SKIP_LIST
+from bybit_bot.config import (
+    HARD_CLOSE_UTC_HOUR,
+    MAX_TRADES_PER_SESSION,
+    PERMANENT_SKIP_LIST,
+    QUICKSCAN_MAX_WORKERS,
+    SESSION_SKIP_LIST,
+)
 
 logger = logging.getLogger("quickscan")
 
@@ -166,7 +172,7 @@ def run_quickscan() -> list[dict]:
         })
     top_candidates = sorted(candidates, key=lambda item: item["price24hPcnt"], reverse=True)[:5]
     hits: list[dict] = []
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    with ThreadPoolExecutor(max_workers=QUICKSCAN_MAX_WORKERS) as executor:
         futures = {executor.submit(data_aggregator.get_capital_flow, coin["symbol"]): coin for coin in top_candidates}
         for future in as_completed(futures):
             coin = futures[future]

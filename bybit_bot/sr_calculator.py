@@ -6,7 +6,12 @@ from typing import Any
 import numpy as np
 
 from bybit_bot import bybit_api
-from bybit_bot.config import MIN_STOP_DIST_PCT, MAX_STOP_DIST_PCT
+from bybit_bot.config import (
+    MIN_STOP_DIST_PCT,
+    MAX_STOP_DIST_PCT,
+    DROP_VOL_WEAK_THRESHOLD,
+    DROP_VOL_STRONG_THRESHOLD,
+)
 
 logger = logging.getLogger("sr_calculator")
 
@@ -321,29 +326,97 @@ def get_sr_levels(symbol: str, current_price: float) -> dict:
 
 
 
-def dead_cat_check(symbol: str, entry_zone_bottom: float) -> dict:
-    """Check the three required 5m-candle conditions before a manual entry."""
-    raw = bybit_api.get_klines(symbol, "5", 5)
-    candles = _api_candles(raw)
-    if len(candles) < 5:
-        logger.warning("dead_cat_insufficient_candles symbol=%s count=%d", symbol, len(candles))
-        return {
-            "passed": False,
-            "rule1_midpoint": {"pass": False, "close": 0.0, "midpoint": 0.0},
-            "rule2_volume": {"pass": False, "volume": 0.0, "threshold": 0.0},
-            "rule3_higher_low": {"pass": False, "low": 0.0, "prior_low": 0.0},
-        }
-    candle = candles[-2]
-    prior_candles = candles[-5:-2]
-    prior_candle = candles[-3]
-    midpoint = (candle["high"] + candle["low"]) / 2
-    volume_threshold = 0.70 * float(np.mean([item["volume"] for item in prior_candles]))
-    rule1 = candle["close"] >= midpoint
-    rule2 = candle["volume"] >= volume_threshold
-    rule3 = candle["low"] > prior_candle["low"]
+def _empty_dead_cat_result() -> dict:
+    """Return the safe dead-cat result used when candle data is insufficient."""
     return {
-        "passed": rule1 and rule2 and rule3,
-        "rule1_midpoint": {"pass": rule1, "close": candle["close"], "midpoint": midpoint},
-        "rule2_volume": {"pass": rule2, "volume": candle["volume"], "threshold": volume_threshold},
-        "rule3_higher_low": {"pass": rule3, "low": candle["low"], "prior_low": prior_candle["low"]},
+        "passed":                False,
+        "drop_vol_ratio":        0.0,
+        "drop_was_weak":         False,
+        "drop_was_strong":       False,
+        "bounce_above_midpoint": False,
+        "bounce_volume_ok":      False,
+        "higher_low":            False,
+        "warning":               None,
     }
+
+
+def dead_cat_check(symbol: str, entry_zone_bottom: float) -> dict:
+    """Check dead-cat conditions using Phase 1 (drop volume) and Phase 2 (bounce quality).
+
+    Phase 1 — Drop Volume Guard (TASK-026 R1):
+        Examines the 5 baseline candles before the bounce candle.
+        A high-volume drop (drop_vol_ratio > DROP_VOL_STRONG_THRESHOLD) blocks entry.
+        A weak drop or no red candles → Phase 1 passes unconditionally.
+        Neutral ratio (0.70–1.30) → Phase 1 passes; Phase 2 gates the final decision.
+
+    Phase 2 — Bounce Quality (pre-existing logic):
+        bounce_above_midpoint: bounce candle closed above its own midpoint.
+        bounce_volume_ok:      bounce volume >= 70% of baseline average.
+        higher_low:            bounce candle low > prior candle low.
+
+    CTO Amendment: guard is ``< 6`` (needs 5 baseline + 1 bounce = 6 minimum).
+    """
+    # Guard: need 5 baseline candles + 1 bounce candle = 6 minimum.
+    raw = bybit_api.get_klines(symbol, "5", 10)
+    candles = _api_candles(raw)
+    if not candles or len(candles) < 6:
+        logger.warning(
+            "dead_cat_insufficient_candles symbol=%s count=%d",
+            symbol, len(candles) if candles else 0,
+        )
+        return _empty_dead_cat_result()
+
+    # ── Phase 1: drop-volume check ────────────────────────────────────────────
+    baseline_candles = candles[-6:-1]   # 5 candles immediately before bounce
+    bounce_candle    = candles[-1]
+    prior_candle     = candles[-2]
+
+    baseline_vol = float(np.mean([c["volume"] for c in baseline_candles])) or 1.0
+
+    if baseline_vol == 0.0:
+        # New listing with zero volume history — cannot evaluate safely.
+        logger.warning("dead_cat_zero_baseline_vol symbol=%s", symbol)
+        return _empty_dead_cat_result()
+
+    drop_candles = [
+        c for c in baseline_candles
+        if float(c["close"]) < float(c["open"])   # bearish / red candle
+    ]
+    drop_vol = float(np.mean([c["volume"] for c in drop_candles])) if drop_candles else 0.0
+
+    drop_vol_ratio  = drop_vol / baseline_vol
+    drop_was_weak   = drop_vol_ratio < DROP_VOL_WEAK_THRESHOLD    # < 0.70
+    drop_was_strong = drop_vol_ratio > DROP_VOL_STRONG_THRESHOLD  # > 1.30
+
+    # Phase 1 passes when the drop was NOT a high-volume dump.
+    # - Weak drop (pullback):    phase1_pass = True
+    # - No red candles at all:   drop_vol = 0.0 → drop_was_weak = True → pass
+    # - Neutral (0.70–1.30):     phase1_pass = True (Phase 2 is the gate)
+    # - Strong dump (> 1.30):    phase1_pass = False — blocks entry
+    phase1_pass = not drop_was_strong
+
+    # ── Phase 2: bounce quality checks ───────────────────────────────────────
+    midpoint         = (bounce_candle["high"] + bounce_candle["low"]) / 2
+    vol_threshold    = DROP_VOL_WEAK_THRESHOLD * baseline_vol  # 70% of baseline
+    close_above_mid  = bounce_candle["close"] >= midpoint
+    vol_ok           = bounce_candle["volume"] >= vol_threshold
+    higher_low       = bounce_candle["low"] > prior_candle["low"]
+
+    # ── Combined result ───────────────────────────────────────────────────────
+    passed = phase1_pass and close_above_mid and vol_ok and higher_low
+
+    return {
+        "passed":                passed,
+        "drop_vol_ratio":        round(drop_vol_ratio, 2),
+        "drop_was_weak":         drop_was_weak,
+        "drop_was_strong":       drop_was_strong,
+        "bounce_above_midpoint": close_above_mid,
+        "bounce_volume_ok":      vol_ok,
+        "higher_low":            higher_low,
+        "warning": (
+            f"HIGH VOLUME DROP ({drop_vol_ratio:.1f}x avg) — "
+            "wait for zone retest confirmation"
+            if drop_was_strong else None
+        ),
+    }
+

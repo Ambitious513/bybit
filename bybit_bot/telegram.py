@@ -8,7 +8,17 @@ from typing import Optional
 
 import requests
 
-from bybit_bot.config import TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+from bybit_bot.config import (
+    TELEGRAM_BOT_TOKEN,
+    TELEGRAM_CHAT_ID,
+    EMAIL_FALLBACK_ENABLED,
+    EMAIL_FROM,
+    EMAIL_TO,
+    SMTP_HOST,
+    SMTP_PORT,
+    SMTP_USER,
+    SMTP_PASSWORD,
+)
 
 logger = logging.getLogger("telegram")
 
@@ -102,3 +112,50 @@ def get_updates(offset: int = 0, timeout: int = 30) -> list[dict]:
     except requests.exceptions.RequestException as exc:
         logger.error("get_updates_error error=%s", exc)
         return []
+
+
+def send_message_with_fallback(text: str) -> bool:
+    """Send via Telegram; fall back to email if Telegram fails and fallback is enabled.
+
+    Use this function for CRITICAL alerts (SL hit, TP1, time-stop, hard close,
+    BTC invalidation) so the operator is notified even during Telegram outages.
+    Use plain ``send_message()`` for informational messages.
+
+    Returns:
+        True if either Telegram or email delivery succeeded, False if both failed.
+    """
+    success = send_message(text)
+    if not success and EMAIL_FALLBACK_ENABLED:
+        return _send_email_fallback(
+            subject="[Bybit Bot] TELEGRAM FAILED — URGENT",
+            body=text,
+        )
+    return success
+
+
+def _send_email_fallback(subject: str, body: str) -> bool:
+    """Send an email via SMTP as a Telegram fallback channel.
+
+    Credentials are loaded from .env via config.py — never hardcoded.
+    Returns True on successful delivery, False on any failure.
+    """
+    import smtplib
+    import ssl
+    from email.message import EmailMessage
+
+    try:
+        msg = EmailMessage()
+        msg["From"]    = EMAIL_FROM
+        msg["To"]      = EMAIL_TO
+        msg["Subject"] = subject
+        msg.set_content(body)
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as s:
+            s.starttls(context=ctx)
+            s.login(SMTP_USER, SMTP_PASSWORD)
+            s.send_message(msg)
+        logger.info("email_fallback_sent subject=%r", subject)
+        return True
+    except Exception as exc:
+        logger.error("email_fallback_failed exc=%s", exc)
+        return False

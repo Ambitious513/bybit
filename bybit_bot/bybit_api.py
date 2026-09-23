@@ -12,13 +12,20 @@ import time
 from typing import Optional
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from bybit_bot.config import BYBIT_BASE_URL
 
 logger = logging.getLogger("bybit_api")
 
+# ── HTTP Session with explicit pool cap (TASK-026 R5) ─────────────────────────
+# Prevents urllib3 connection-pool overflow warnings when quickscan fires
+# concurrent API calls via ThreadPoolExecutor.
+_ADAPTER = HTTPAdapter(pool_connections=5, pool_maxsize=10, max_retries=3)
 _SESSION = requests.Session()
 _SESSION.headers.update({"Content-Type": "application/json"})
+_SESSION.mount("https://", _ADAPTER)
+_SESSION.mount("http://",  _ADAPTER)
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 

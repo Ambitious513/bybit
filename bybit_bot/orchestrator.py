@@ -298,6 +298,14 @@ def handle_filled(symbol: str, price: float, time_str: str) -> None:
     except ValueError:
         telegram.send_message("⚠️ Invalid fill time — use HH:MM (UTC)")
         return
+    # R2 — Reject invalid fill prices before any write to active_orders.json.
+    if price <= 0:
+        telegram.send_message(
+            f"❌ Invalid fill price: {price}\n"
+            f"Price must be a positive number.\n"
+            f"Example: /filled LABUSDT 0.06045 10:32"
+        )
+        return
     if not _ORDERS_LOCK.acquire(timeout=10.0):
         logger.error("filled_lock_timeout symbol=%s", normalized)
         telegram.send_message("⚠️ Order state is busy — retry /filled in a moment")
@@ -709,6 +717,68 @@ def _heartbeat() -> None:
         )
     except Exception as exc:
         logger.warning("heartbeat_failed error=%s", exc)
+
+
+def audit_tradfi_perps() -> None:
+    """Verify all TRADFI_PERPS symbols are active on Bybit linear perpetuals.
+
+    Called once at startup after API connectivity is confirmed.
+    A failed audit sends a Telegram warning but does NOT prevent the bot from starting.
+    """
+    inactive: list[str] = []
+    for symbol in TRADFI_PERPS:
+        result = bybit_api.get_ticker(symbol)
+        if result is None or _float(result.get("price")) <= 0:
+            inactive.append(symbol)
+    if inactive:
+        telegram.send_message(
+            f"⚠️ TRADFI PERPS AUDIT — {len(inactive)} INACTIVE:\n"
+            + "\n".join(f"  ❌ {s}" for s in inactive)
+            + "\n→ Remove from TRADFI_PERPS in config.py"
+        )
+        logger.warning("tradfi_audit_inactive symbols=%s", inactive)
+    else:
+        logger.info("tradfi_audit_ok all_%d_symbols_active", len(TRADFI_PERPS))
+
+
+def handle_test_email() -> None:
+    """Send a test email to confirm fallback delivery before GATE-3.
+
+    The operator MUST run /test_email and confirm receipt before GATE-3 approval.
+    Requires EMAIL_FALLBACK_ENABLED=True in .env.
+    """
+    from bybit_bot.config import EMAIL_FALLBACK_ENABLED
+    from bybit_bot import telegram as tg
+
+    if not EMAIL_FALLBACK_ENABLED:
+        telegram.send_message(
+            "⚠️ Email fallback is disabled.\n"
+            "Set EMAIL_FALLBACK_ENABLED=True in .env and restart the bot."
+        )
+        return
+    now = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    body = (
+        f"[Bybit Bot] Test email — GATE-3 pre-check\n"
+        f"Sent at: {now}\n"
+        f"If you received this, email fallback is working correctly.\n"
+        f"Operator must confirm receipt before GATE-3 approval."
+    )
+    ok = tg._send_email_fallback(
+        subject="[Bybit Bot] Test Email — GATE-3 Pre-check",
+        body=body,
+    )
+    if ok:
+        telegram.send_message(
+            "✅ Test email sent successfully.\n"
+            "Check your inbox and confirm receipt before GATE-3."
+        )
+        logger.info("test_email_sent ok=True")
+    else:
+        telegram.send_message(
+            "❌ Test email FAILED — check SMTP credentials in .env\n"
+            "Bot log contains the error detail."
+        )
+        logger.error("test_email_failed")
 
 
 def cmd_daemon() -> None:

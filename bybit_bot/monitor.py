@@ -8,7 +8,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from bybit_bot import bybit_api, sr_calculator, telegram
-from bybit_bot.config import HARD_CLOSE_UTC_HOUR, PAPER_BALANCE, PAPER_BALANCE_FLOOR, TIME_STOP_HOURS
+from bybit_bot.config import (
+    CROWDED_FUNDING_THRESHOLD,
+    HARD_CLOSE_UTC_HOUR,
+    PAPER_BALANCE,
+    PAPER_BALANCE_FLOOR,
+    TIME_STOP_HOURS,
+)
 
 logger = logging.getLogger("monitor")
 
@@ -161,6 +167,28 @@ def load_btc_regime_from_cache() -> str:
     except (OSError, ValueError, json.JSONDecodeError, AttributeError) as exc:
         logger.warning("btc_regime_cache_unavailable error=%s", exc)
         return "CHOPPY"
+
+
+def check_funding_creep(order: dict, current_funding: float) -> str | None:
+    """Return a funding-creep warning message if the order has crossed the crowded threshold.
+
+    Fires AT MOST ONCE per order — guarded by the ``funding_warned`` flag.
+    Returns the alert text when the alert should fire, None otherwise.
+    Caller must set ``order["funding_warned"] = True`` and persist before sending.
+    """
+    if order.get("funding_warned"):
+        return None
+    if abs(current_funding) >= CROWDED_FUNDING_THRESHOLD:
+        symbol = order.get("symbol", "UNKNOWN")
+        return (
+            f"⚠️ FUNDING CREEP — {symbol}\n"
+            f"   Funding now: {current_funding * 100:.4f}%\n"
+            f"   Threshold:   {CROWDED_FUNDING_THRESHOLD * 100:.4f}%\n"
+            "→ Position is now in overcrowded territory\n"
+            "→ Consider closing RUNNER early\n"
+            "→ Keep CORE — do NOT override TP1"
+        )
+    return None
 
 
 def _close_order(order: dict, exit_price: float, reason: str) -> None:
@@ -340,6 +368,17 @@ def run_monitor_cycle() -> None:
                     continue
                 current_price = _float(ticker.get("price"))
                 alerts, updated = check_order(order, current_price, _float(btc_ticker.get("price")), btc_regime)
+                # R6 — Funding creep check (once per order)
+                funding_data = bybit_api.get_funding_rate(symbol)
+                if funding_data is not None:
+                    current_funding = _float(funding_data.get("fundingRate"))
+                    creep_warning = check_funding_creep(updated, current_funding)
+                    if creep_warning is not None:
+                        updated["funding_warned"] = True
+                        # Persist the flag before sending the alert to guarantee
+                        # at-most-once delivery even if the process restarts.
+                        _atomic_write(_ACTIVE_ORDERS_PATH, [*updated_orders, updated], "active_orders")
+                        telegram.send_message(creep_warning)
             else:
                 alerts, updated = [], order
             for alert in alerts:

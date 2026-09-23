@@ -102,25 +102,27 @@ def test_get_sr_levels_returns_valid_geometry(monkeypatch):
 @pytest.mark.parametrize(
     ("candidate", "assertion"),
     [
-        ({"high": 110, "low": 100, "close": 104, "volume": 10}, lambda result: not result["rule1_midpoint"]["pass"]),
-        ({"high": 110, "low": 101, "close": 108, "volume": 4}, lambda result: not result["rule2_volume"]["pass"]),
-        ({"high": 110, "low": 99, "close": 108, "volume": 10}, lambda result: not result["rule3_higher_low"]["pass"]),
+        # candidate = the bounce candle (last); Phase 1 passes because base candles are doji (open==close)
+        ({"high": 110, "low": 100, "close": 104, "volume": 10}, lambda r: not r["bounce_above_midpoint"]),
+        ({"high": 110, "low": 101, "close": 108, "volume": 4},  lambda r: not r["bounce_volume_ok"]),
+        ({"high": 110, "low": 99,  "close": 108, "volume": 10}, lambda r: not r["higher_low"]),
     ],
 )
 def test_dead_cat_rule_failures(monkeypatch, candidate, assertion):
+    # CTO amendment: guard is < 6 — provide 5 base candles + 1 bounce = 6 total.
+    # Base candles are doji (open==close) so no red candles → Phase 1 passes; candidate tests Phase 2.
     calculator = _module()
-    candles = [_candle(index, high=109, low=100, close=106, volume=10) for index in range(3)]
-    candles.append(_candle(3, **candidate))
-    candles.append(_candle(4, high=110, low=102, close=108, volume=10))
+    candles = [_candle(index, high=109, low=100, close=106, volume=10) for index in range(5)]
+    candles.append(_candle(5, **candidate))  # bounce candle = the Phase-2 rule under test
     monkeypatch.setattr(calculator.bybit_api, "get_klines", lambda *args: _raw(candles))
     assert assertion(calculator.dead_cat_check("TESTUSDT", 100.0))
 
 
 def test_dead_cat_all_pass(monkeypatch):
+    # CTO amendment: guard is < 6 — provide 5 base + 1 clean bounce = 6 total.
     calculator = _module()
-    candles = [_candle(index, high=109, low=100, close=106, volume=10) for index in range(3)]
-    candles.append(_candle(3, high=110, low=101, close=108, volume=10))
-    candles.append(_candle(4, high=111, low=102, close=109, volume=10))
+    candles = [_candle(index, high=109, low=100, close=106, volume=10) for index in range(5)]
+    candles.append(_candle(5, high=111, low=102, close=109, volume=10))
     monkeypatch.setattr(calculator.bybit_api, "get_klines", lambda *args: _raw(candles))
     result = calculator.dead_cat_check("TESTUSDT", 100.0)
     assert result["passed"] is True

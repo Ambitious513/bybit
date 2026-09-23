@@ -151,3 +151,27 @@ MAX_STOP_DIST_PCT = 0.08    # 8.0 % maximum stop distance (above this → disqua
 
 # ── SESSION SKIP LIST — runtime only, cleared on restart ─────────────────────
 SESSION_SKIP_LIST: list[str] = []
+
+# ── TASK-026 R1 — Dead Cat Phase 1 drop-volume thresholds ────────────────────
+# Used by sr_calculator.dead_cat_check() Phase 1.
+DROP_VOL_WEAK_THRESHOLD   = 0.70   # drop_vol_ratio < 0.70 → weak drop (pullback)
+DROP_VOL_STRONG_THRESHOLD = 1.30   # drop_vol_ratio > 1.30 → strong dump → block entry
+BOUNCE_VOL_MIN_RATIO      = 0.70   # minimum bounce volume vs baseline
+
+# ── TASK-026 R5 — Quick scan executor cap ─────────────────────────────────────
+QUICKSCAN_MAX_WORKERS = 8
+
+# ── TASK-026 R4 — Email fallback (Telegram failure) ───────────────────────────
+# Set EMAIL_FALLBACK_ENABLED=True in .env before GATE-3.
+# ALL credentials must be set via environment variables — no hardcoded defaults.
+EMAIL_FALLBACK_ENABLED = False
+EMAIL_FROM    = os.getenv("EMAIL_FROM", "")
+EMAIL_TO      = os.getenv("EMAIL_TO", "")
+SMTP_HOST     = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT     = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER     = os.getenv("SMTP_USER", "")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+
+# ── TASK-026 R6 — Funding creep alert threshold ───────────────────────────────
+# Alert fires once per order when abs(funding) >= this threshold.
+CROWDED_FUNDING_THRESHOLD = 0.0005   # 0.05% = crowded funding
