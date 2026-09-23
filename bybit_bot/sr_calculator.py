@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from bybit_bot import bybit_api
+from bybit_bot.config import MIN_STOP_DIST_PCT, MAX_STOP_DIST_PCT
 
 logger = logging.getLogger("sr_calculator")
 
@@ -161,13 +162,80 @@ def _best_entry_zone(support_clusters: list[dict], current_price: float) -> dict
     return max(below_price, key=lambda cluster: (cluster.get("score", 0.0), cluster.get("level", 0.0)))
 
 
-def _find_sl(support_clusters: list[dict], entry_zone_bottom: float) -> float:
-    """Place the stop 0.3% beneath the deepest confirmed lower support."""
-    confirmed = [cluster for cluster in support_clusters if cluster.get("top", 0.0) < entry_zone_bottom]
+
+# R4 local constant — exclude 1D supports more than this far below zone bottom.
+# Prevents deep historical Fibonacci / Volume Profile bottoms from polluting SL selection.
+_MAX_SL_DEPTH_PCT: float = 0.15  # 15 %
+
+
+def _find_sl(
+    support_clusters: list[dict],
+    entry_zone_bottom: float,
+    symbol: str = "",
+) -> float | None:
+    """Return the stop-loss price 0.3 % beneath the nearest confirmed support below entry zone.
+
+    Algorithm (R1 + R4):
+    1.  Filter candidates to clusters whose **top** is strictly below ``entry_zone_bottom``.
+    2.  R4 depth filter: exclude clusters whose weighted ``level`` is > 15 % below zone bottom.
+        If the depth filter removes *all* candidates, bypass it (logged) and use the full list.
+    3.  R1: select the *nearest* (highest-level) candidate via ``max(..., key="level")``.
+    4.  R2: validate stop distance against MIN_STOP_DIST_PCT / MAX_STOP_DIST_PCT.
+        - Too tight  → widen to MIN_STOP_DIST_PCT.
+        - Too wide   → disqualify; return None (caller must call _empty_result).
+
+    Returns:
+        float — stop-loss price, or None when stop is too wide to qualify.
+    """
+    # ── Step 1: candidates strictly below zone bottom ───────────────────────
+    below_zone = [
+        cluster for cluster in support_clusters
+        if cluster.get("top", 0.0) < entry_zone_bottom
+    ]
+
+    if not below_zone:
+        logger.warning(
+            "sl_no_support_below_zone symbol=%s zone_bottom=%.8f — using 0.5pct fallback",
+            symbol, entry_zone_bottom,
+        )
+        return entry_zone_bottom * 0.995  # R1: 0.5% tight fallback (was 3%)
+
+    # ── Step 2: R4 depth filter (15 % max depth) ────────────────────────────
+    confirmed = [
+        cluster for cluster in below_zone
+        if (entry_zone_bottom - cluster.get("level", 0.0)) / entry_zone_bottom <= _MAX_SL_DEPTH_PCT
+    ]
+
     if not confirmed:
-        return entry_zone_bottom * 0.97
-    deepest = min(confirmed, key=lambda cluster: cluster.get("bottom", float("inf")))
-    return float(deepest["bottom"]) * (1 - 0.003)
+        # Bypass: all candidates are deeper than 15 % — use unfiltered list
+        confirmed = below_zone
+        logger.info(
+            "sl_depth_filter_bypassed symbol=%s — using unfiltered candidates (all >15%% below zone)",
+            symbol,
+        )
+
+    # ── Step 3: R1 — nearest (highest weighted level) below zone ────────────
+    nearest = max(confirmed, key=lambda cluster: cluster.get("level", 0.0))
+    sl = float(nearest["bottom"]) * (1 - 0.003)
+
+    # ── Step 4: R2 — stop distance validation ───────────────────────────────
+    stop_dist_pct = (entry_zone_bottom - sl) / entry_zone_bottom
+
+    if stop_dist_pct < MIN_STOP_DIST_PCT:
+        logger.warning(
+            "sl_too_tight symbol=%s stop_pct=%.4f — widening to minimum %.4f",
+            symbol, stop_dist_pct, MIN_STOP_DIST_PCT,
+        )
+        sl = entry_zone_bottom * (1 - MIN_STOP_DIST_PCT)
+
+    elif stop_dist_pct > MAX_STOP_DIST_PCT:
+        logger.warning(
+            "sl_too_wide symbol=%s stop_pct=%.4f — disqualified (max %.4f)",
+            symbol, stop_dist_pct, MAX_STOP_DIST_PCT,
+        )
+        return None
+
+    return sl
 
 
 def _top_resistances(resistance_clusters: list[dict], current_price: float, n: int = 3) -> list[float]:
@@ -217,7 +285,24 @@ def get_sr_levels(symbol: str, current_price: float) -> dict:
         entry_top = min(current_price * (1 - 0.000001), entry_top * 1.0025)
         entry_bottom *= 0.9975
     entry_mid = (entry_top + entry_bottom) / 2
-    sl_level = _find_sl(support_clusters, entry_bottom)
+
+    # R3 observability: count candidates before calling _find_sl
+    sl_candidates_below = [
+        c for c in support_clusters
+        if c.get("top", 0.0) < entry_bottom
+    ]
+    sl_candidates_count = len(sl_candidates_below)
+
+    # Detect whether fallback (no candidates below zone) will be used
+    sl_fallback_used = sl_candidates_count == 0
+
+    sl_level = _find_sl(support_clusters, entry_bottom, symbol=symbol)
+
+    # R2: _find_sl returns None when stop is too wide → disqualify setup
+    if sl_level is None:
+        logger.warning("get_sr_levels_sl_disqualified symbol=%s — _find_sl returned None", symbol)
+        return _empty_result(symbol)
+
     return {
         "symbol": symbol,
         "current_price": float(current_price),
@@ -229,7 +314,11 @@ def get_sr_levels(symbol: str, current_price: float) -> dict:
         "resistances": _top_resistances(resistance_clusters, current_price),
         "confluence_score": float(entry_zone.get("score", 0.0)),
         "gap_to_zone_pct": max(0.0, (current_price - entry_top) / current_price * 100),
+        # R3 — additive observability fields
+        "sl_fallback_used": sl_fallback_used,
+        "sl_candidates": sl_candidates_count,
     }
+
 
 
 def dead_cat_check(symbol: str, entry_zone_bottom: float) -> dict:

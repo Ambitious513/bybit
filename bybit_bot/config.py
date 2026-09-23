@@ -144,5 +144,10 @@ WATCHLIST_STANDING = {
     },
 }
 
+# ── STOP DISTANCE BOUNDS — IMMUTABLE (docs/STRATEGY_SPEC.md Section 6.1) ──────
+# Read by sr_calculator._find_sl() — do NOT change without strategy approval.
+MIN_STOP_DIST_PCT = 0.003   # 0.3 % minimum stop distance (below this → widen)
+MAX_STOP_DIST_PCT = 0.08    # 8.0 % maximum stop distance (above this → disqualify)
+
 # ── SESSION SKIP LIST — runtime only, cleared on restart ─────────────────────
 SESSION_SKIP_LIST: list[str] = []
