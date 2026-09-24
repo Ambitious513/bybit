@@ -149,4 +149,3 @@ symbol and boundary condition.
 Do not treat any future implementation as live-trading authorization. Maintain
 paper-only operation until the human grants GATE-3 after all task reviews,
 operator checks, and the required observation period are complete.
-
